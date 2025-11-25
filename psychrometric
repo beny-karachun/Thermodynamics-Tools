@@ -1,0 +1,472 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { CloudRain, Thermometer, Droplets, Wind, Info, Globe } from 'lucide-react';
+
+// --- Physics Constants & Calculations ---
+const PATM = 101.325; // kPa
+
+// Magnus formula for Saturation Vapor Pressure (kPa) given T (Celsius)
+const getSatPressure = (T: number) => {
+  return 0.61094 * Math.exp((17.625 * T) / (T + 243.04));
+};
+
+// Calculate Humidity Ratio (w) [kg water / kg dry air]
+// w = 0.622 * Pv / (Patm - Pv)
+// Pv = RH * Psat
+const getHumidityRatio = (T: number, RH: number) => {
+  const Psat = getSatPressure(T);
+  const Pv = (RH / 100) * Psat;
+  const w = 0.622 * Pv / (PATM - Pv);
+  return Math.max(0, w);
+};
+
+// Calculate Enthalpy (h) [kJ/kg dry air]
+// h = 1.006*T + w*(2501 + 1.86*T)
+const getEnthalpy = (T: number, w: number) => {
+  return 1.006 * T + w * (2501 + 1.86 * T);
+};
+
+// Calculate Dew Point (Tdp) [Celsius]
+// Inverse of Magnus formula
+const getDewPoint = (T: number, RH: number) => {
+  const Psat = getSatPressure(T);
+  const Pv = (RH / 100) * Psat;
+  // Avoid log(0)
+  if (Pv <= 0.001) return -50;
+  
+  const a = 17.625;
+  const b = 243.04;
+  const alpha = Math.log(Pv / 0.61094);
+  const Tdp = (b * alpha) / (a - alpha);
+  return Tdp;
+};
+
+// --- Translations ---
+const translations = {
+  en: {
+    title: "Interactive Psychrometric Lab",
+    subtitle: "A tool for the Thermodynamics course (Biotechnology & Food Engineering). Change air conditions and discover how thermodynamic properties change on the psychrometric chart.",
+    controlsTitle: "Air Conditions (Controls)",
+    tempLabel: "Temperature (Dry Bulb)",
+    rhLabel: "Relative Humidity (RH)",
+    dry: "0% (Completely Dry)",
+    saturated: "100% (Saturated)",
+    tip: "💡 Tip: Try increasing the temperature while keeping relative humidity constant. What happens to the water content (g/kg)? Does it stay constant?",
+    vizTitle: "Visual: \"How much water is in the air?\"",
+    full: "% Full",
+    bucketDesc1: "The bucket represents the air's capacity to hold vapor at the current temperature",
+    bucketDesc2: "As temperature rises, the \"bucket\" grows (air can hold more water).",
+    wLabel: "Humidity Ratio (w)",
+    wDesc: "Actual water amount (in grams) per kg of dry air. Also called 'Absolute Humidity'.",
+    tdpLabel: "Dew Point (Tdp)",
+    tdpDesc: "The temperature to which air must be cooled to start condensation (dew). If current T = Tdp, RH is 100%.",
+    hLabel: "Enthalpy (h)",
+    hDesc: "Total energy (heat) stored in the air. Composed of dry air heat + latent heat of vapor.",
+    pvLabel: "Vapor Pressure (Pv)",
+    pvDesc: "Partial pressure exerted by water vapor in the air mixture.",
+    chartTitle: "Psychrometric Chart (Schematic)",
+    yourState: "Red Dot = Your State",
+    chartNote: "*Graph calculated in real-time using Magnus approximation formulas for standard atmospheric pressure (101.3kPa).",
+    // Canvas specific
+    satLine: "Saturation Line (100%)",
+    xAxis: "Temperature - Dry Bulb (°C)",
+    yAxis: "Humidity Ratio (g/kg)",
+  },
+  he: {
+    title: "המעבדה הפסיכרומטרית האינטראקטיבית",
+    subtitle: "כלי עזר לקורס תרמודינמיקה (הנדסת מזון וביוטכנולוגיה). שנו את תנאי האוויר וגלו כיצד משתנות התכונות התרמודינמיות, כפי שמוצג בדיאגרמה הפסיכרומטרית.",
+    controlsTitle: "תנאי האוויר (Controls)",
+    tempLabel: "טמפרטורה (Dry Bulb)",
+    rhLabel: "לחות יחסית (RH)",
+    dry: "0% (יבש לחלוטין)",
+    saturated: "100% (רוויה)",
+    tip: "💡 טיפ: נסו להעלות את הטמפרטורה תוך שמירה על לחות יחסית קבועה. מה קורה לכמות המים (g/kg)? האם היא נשארת קבועה?",
+    vizTitle: "המחשה ויזואלית: \"כמה מים יש באוויר?\"",
+    full: "% מלא",
+    bucketDesc1: "המיכל מייצג את יכולת האוויר להכיל אדים בטמפרטורה הנוכחית",
+    bucketDesc2: "ככל שהטמפרטורה עולה, ה\"מיכל\" גדל (האוויר יכול להכיל יותר מים).",
+    wLabel: "תכולת רטיבות (w)",
+    wDesc: "כמות המים הממשית (בגרמים) שיש בכל קילוגרם של אוויר יבש. מכונה גם 'לחות מוחלטת'.",
+    tdpLabel: "נקודת הטל (Tdp)",
+    tdpDesc: "הטמפרטורה אליה יש לקרר את האוויר כדי שיתחיל עיבוי (יווצר טל). אם הטמפרטורה הנוכחית שווה לנקודת הטל, הלחות היחסית היא 100%.",
+    hLabel: "אנתלפיה (h)",
+    hDesc: "האנרגיה הכוללת (חום) האגורה באוויר. מורכבת מהחום של האוויר היבש + החום הכמוס של אדי המים.",
+    pvLabel: "לחץ אדים (Pv)",
+    pvDesc: "הלחץ החלקי שמפעילים אדי המים בתערובת האוויר.",
+    chartTitle: "דיאגרמה פסיכרומטרית (סכמטית)",
+    yourState: "הנקודה האדומה = המצב שלך",
+    chartNote: "*הגרף מחושב בזמן אמת ע\"פ נוסחאות קירוב (Magnus) ללחץ אטמוספרי סטנדרטי (101.3kPa).",
+    // Canvas specific
+    satLine: "קו הרוויה (100%)",
+    xAxis: "טמפרטורה - נורה יבשה (°C)",
+    yAxis: "תכולת רטיבות (g/kg)",
+  }
+};
+
+// --- Components ---
+
+const ValueCard = ({ icon: Icon, label, value, unit, description, color }: any) => (
+  <div className={`bg-white p-4 rounded-xl shadow-md border-l-4 ${color} transition-all hover:shadow-lg`}>
+    <div className="flex justify-between items-start mb-2">
+      <div className="flex items-center gap-2">
+        <div className={`p-2 rounded-full ${color.replace('border-', 'bg-').replace('-500', '-100')}`}>
+          <Icon size={20} className={color.replace('border-', 'text-')} />
+        </div>
+        <span className="font-bold text-gray-700">{label}</span>
+      </div>
+      <div className="group relative">
+        <Info size={16} className="text-gray-400 cursor-help" />
+        <div className="absolute left-1/2 -translate-x-1/2 bottom-full mb-2 w-48 p-2 bg-gray-800 text-white text-xs rounded opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10 text-center shadow-xl">
+          {description}
+        </div>
+      </div>
+    </div>
+    <div className="text-2xl font-mono font-bold text-gray-800">
+      {value} <span className="text-sm font-normal text-gray-500">{unit}</span>
+    </div>
+  </div>
+);
+
+interface CanvasLabels {
+  satLine: string;
+  xAxis: string;
+  yAxis: string;
+}
+
+const PsychrometricChartCanvas = ({ currentT, currentw, currentRH, labels }: { currentT: number, currentw: number, currentRH: number, labels: CanvasLabels }) => {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    // Canvas dimensions
+    const width = canvas.width;
+    const height = canvas.height;
+    
+    // Chart Ranges
+    const minT = 0;
+    const maxT = 50;
+    const maxW = 0.030; // 30g/kg max for display
+
+    // Scaling functions
+    const mapX = (t: number) => ((t - minT) / (maxT - minT)) * (width - 60) + 40;
+    const mapY = (w: number) => height - 40 - (w / maxW) * (height - 60);
+
+    // Draw Background
+    ctx.clearRect(0, 0, width, height);
+    ctx.fillStyle = '#f8fafc';
+    ctx.fillRect(0, 0, width, height);
+
+    // Draw Grid Lines (Temperature)
+    ctx.strokeStyle = '#e2e8f0';
+    ctx.lineWidth = 1;
+    for (let t = minT; t <= maxT; t += 5) {
+      const x = mapX(t);
+      ctx.beginPath();
+      ctx.moveTo(x, mapY(0));
+      ctx.lineTo(x, mapY(maxW));
+      ctx.stroke();
+      ctx.fillStyle = '#64748b';
+      ctx.font = '10px sans-serif';
+      ctx.fillText(`${t}°`, x - 5, height - 25);
+    }
+
+    // Draw Grid Lines (Humidity Ratio)
+    for (let w = 0; w <= maxW; w += 0.005) {
+      const y = mapY(w);
+      ctx.beginPath();
+      ctx.moveTo(mapX(minT), y);
+      ctx.lineTo(mapX(maxT), y);
+      ctx.stroke();
+      ctx.fillStyle = '#64748b';
+      ctx.fillText(`${(w * 1000).toFixed(0)}`, 10, y + 3);
+    }
+
+    // Draw RH Curves
+    const rhValues = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
+    rhValues.forEach(rh => {
+      ctx.beginPath();
+      ctx.strokeStyle = rh === 100 ? '#3b82f6' : '#cbd5e1';
+      ctx.lineWidth = rh === 100 ? 2 : 1;
+      
+      let startDraw = false;
+      for (let t = minT; t <= maxT; t += 0.5) {
+        const w = getHumidityRatio(t, rh);
+        if (w <= maxW) {
+          const x = mapX(t);
+          const y = mapY(w);
+          if (!startDraw) {
+            ctx.moveTo(x, y);
+            startDraw = true;
+          } else {
+            ctx.lineTo(x, y);
+          }
+        }
+      }
+      ctx.stroke();
+      
+      // Label RH curves
+      if (rh % 20 === 0 || rh === 100) {
+        // Find a point near the middle/end to place label
+        const labelT = 35;
+        const labelW = getHumidityRatio(labelT, rh);
+        if (labelW < maxW) {
+           ctx.fillStyle = rh === 100 ? '#2563eb' : '#94a3b8';
+           ctx.fillText(`${rh}%`, mapX(labelT) + 2, mapY(labelW) - 2);
+        }
+      }
+    });
+
+    // Draw Saturation Line Label
+    ctx.fillStyle = '#2563eb';
+    ctx.font = 'bold 12px sans-serif';
+    ctx.fillText(labels.satLine, 45, 30);
+
+    // Plot Current Point
+    const px = mapX(currentT);
+    const py = mapY(currentw);
+
+    // Draw Drop Lines
+    ctx.setLineDash([5, 5]);
+    ctx.strokeStyle = '#ef4444'; // Red for Temp
+    ctx.beginPath();
+    ctx.moveTo(px, py);
+    ctx.lineTo(px, height - 40);
+    ctx.stroke();
+
+    ctx.strokeStyle = '#3b82f6'; // Blue for W
+    ctx.beginPath();
+    ctx.moveTo(px, py);
+    ctx.lineTo(mapX(maxT), py); // Go right to scale
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Draw Point
+    ctx.beginPath();
+    ctx.arc(px, py, 6, 0, 2 * Math.PI);
+    ctx.fillStyle = '#ef4444';
+    ctx.fill();
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Axis Labels
+    ctx.save();
+    ctx.translate(mapX(maxT) + 40, height / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillStyle = '#475569';
+    ctx.font = '12px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(labels.yAxis, 0, 0);
+    ctx.restore();
+
+    ctx.fillStyle = '#475569';
+    ctx.textAlign = 'center';
+    ctx.fillText(labels.xAxis, width / 2, height - 5);
+
+  }, [currentT, currentw, labels]);
+
+  return (
+    <div className="relative w-full h-full overflow-hidden bg-white rounded-xl shadow-inner border border-gray-200">
+      <canvas 
+        ref={canvasRef} 
+        width={500} 
+        height={350}
+        className="w-full h-full object-contain"
+      />
+    </div>
+  );
+};
+
+export default function PsychrometricLab() {
+  const [temp, setTemp] = useState<number>(25); // Celsius
+  const [rh, setRh] = useState<number>(50); // %
+  const [lang, setLang] = useState<'en' | 'he'>('en');
+
+  // Derived calculations
+  const humidityRatio = getHumidityRatio(temp, rh);
+  const w_grams = humidityRatio * 1000; // convert to g/kg
+  const enthalpy = getEnthalpy(temp, humidityRatio);
+  const dewPoint = getDewPoint(temp, rh);
+
+  // Current translation
+  const t = translations[lang];
+  const isRTL = lang === 'he';
+
+  return (
+    <div className="min-h-screen bg-slate-50 font-sans p-4 md:p-8" dir={isRTL ? "rtl" : "ltr"}>
+      
+      {/* Language Toggle Fixed Position */}
+      <div className={`fixed top-4 ${isRTL ? 'left-4' : 'right-4'} z-50`}>
+        <button
+          onClick={() => setLang(lang === 'en' ? 'he' : 'en')}
+          className="flex items-center gap-2 bg-white text-slate-700 px-4 py-2 rounded-full shadow-lg border border-slate-200 hover:bg-slate-50 transition-colors font-bold"
+        >
+          <Globe size={18} />
+          {lang === 'en' ? 'עברית' : 'English'}
+        </button>
+      </div>
+
+      {/* Header */}
+      <header className="max-w-6xl mx-auto mb-8 text-center pt-8">
+        <h1 className="text-3xl md:text-4xl font-extrabold text-slate-800 mb-2">
+          🌡️ {t.title}
+        </h1>
+        <p className="text-slate-600 max-w-2xl mx-auto">
+          {t.subtitle}
+        </p>
+      </header>
+
+      <main className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-8">
+        
+        {/* Controls Section */}
+        <div className="lg:col-span-1 space-y-6">
+          <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+            <h2 className="text-xl font-bold text-slate-800 mb-6 flex items-center gap-2">
+              <Wind className="text-blue-500" />
+              {t.controlsTitle}
+            </h2>
+
+            {/* Temperature Slider */}
+            <div className="mb-8">
+              <label className="flex justify-between mb-2">
+                <span className="font-semibold text-slate-700">{t.tempLabel}</span>
+                <span className="bg-red-100 text-red-700 px-2 py-0.5 rounded text-sm font-bold">{temp}°C</span>
+              </label>
+              <input
+                type="range"
+                min="0"
+                max="50"
+                step="0.5"
+                value={temp}
+                onChange={(e) => setTemp(parseFloat(e.target.value))}
+                className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-red-500"
+              />
+              <div className="flex justify-between text-xs text-slate-400 mt-1">
+                <span>0°C</span>
+                <span>50°C</span>
+              </div>
+            </div>
+
+            {/* RH Slider */}
+            <div className="mb-4">
+              <label className="flex justify-between mb-2">
+                <span className="font-semibold text-slate-700">{t.rhLabel}</span>
+                <span className="bg-blue-100 text-blue-700 px-2 py-0.5 rounded text-sm font-bold">{rh}%</span>
+              </label>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                step="1"
+                value={rh}
+                onChange={(e) => setRh(parseFloat(e.target.value))}
+                className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-500"
+              />
+              <div className="flex justify-between text-xs text-slate-400 mt-1">
+                <span>{t.dry}</span>
+                <span>{t.saturated}</span>
+              </div>
+            </div>
+            
+            <div className="mt-6 p-4 bg-blue-50 rounded-lg text-sm text-blue-800 border border-blue-100">
+              <p>{t.tip}</p>
+            </div>
+          </div>
+
+          {/* Visualization: Water Bucket Concept */}
+          <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+            <h3 className="font-bold text-slate-700 mb-4">{t.vizTitle}</h3>
+            <div className="flex items-end justify-center h-32 gap-4">
+              {/* Air capacity representation */}
+              <div className="relative w-16 bg-gray-100 border-2 border-gray-300 rounded-b-lg overflow-hidden flex flex-col justify-end" style={{ height: '100%' }}>
+                <div 
+                  className="w-full bg-blue-400 transition-all duration-300 relative"
+                  style={{ height: rh + '%' }}
+                >
+                    <div className="absolute top-0 w-full h-1 bg-blue-300 animate-pulse"></div>
+                </div>
+                <div className="absolute inset-0 flex items-center justify-center text-xs font-bold text-slate-500 z-10 mix-blend-multiply">
+                  {rh}{t.full}
+                </div>
+              </div>
+              <div className="text-sm text-slate-500 w-32">
+                <p>{t.bucketDesc1} ({temp}°C).</p>
+                <p className="mt-2 text-xs">{t.bucketDesc2}</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Results & Chart Section */}
+        <div className="lg:col-span-2 space-y-6">
+          
+          {/* Data Cards Grid */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <ValueCard 
+              icon={Droplets} 
+              label={t.wLabel} 
+              value={w_grams.toFixed(2)} 
+              unit="g/kg dry air" 
+              color="border-blue-500"
+              description={t.wDesc}
+            />
+            <ValueCard 
+              icon={CloudRain} 
+              label={t.tdpLabel} 
+              value={dewPoint.toFixed(1)} 
+              unit="°C" 
+              color="border-teal-500"
+              description={t.tdpDesc}
+            />
+            <ValueCard 
+              icon={Thermometer} 
+              label={t.hLabel} 
+              value={enthalpy.toFixed(1)} 
+              unit="kJ/kg" 
+              color="border-orange-500"
+              description={t.hDesc}
+            />
+            <ValueCard 
+              icon={Wind} 
+              label={t.pvLabel} 
+              value={((rh/100) * getSatPressure(temp)).toFixed(2)} 
+              unit="kPa" 
+              color="border-purple-500"
+              description={t.pvDesc}
+            />
+          </div>
+
+          {/* Interactive Chart */}
+          <div className="bg-white p-4 rounded-2xl shadow-lg border border-slate-200">
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-lg font-bold text-slate-800">{t.chartTitle}</h2>
+              <span className="text-xs bg-yellow-100 text-yellow-800 px-2 py-1 rounded-full border border-yellow-200">
+                {t.yourState}
+              </span>
+            </div>
+            
+            <div className="aspect-[4/3] w-full bg-slate-50 rounded-lg overflow-hidden border border-slate-200">
+              <PsychrometricChartCanvas 
+                currentT={temp} 
+                currentw={humidityRatio} 
+                currentRH={rh} 
+                labels={{
+                  satLine: t.satLine,
+                  xAxis: t.xAxis,
+                  yAxis: t.yAxis
+                }}
+              />
+            </div>
+             <p className="text-xs text-gray-400 mt-2 text-center" dir="ltr">
+              {t.chartNote}
+            </p>
+          </div>
+
+        </div>
+      </main>
+    </div>
+  );
+}
